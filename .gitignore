@@ -8,3 +8,4 @@ backups/
 *.swp
 .idea
 /venv/
+/desktop-app/config.json
