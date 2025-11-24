@@ -10,6 +10,7 @@ import sys
 import json
 import ctypes
 import traceback
+import time
 
 # Add the current directory to the DLL search path to find opus.dll
 if sys.platform == 'win32':
@@ -37,6 +38,7 @@ COMMAND_HOST_HL = 0x08
 COMMAND_HOST_RSSI = 0x09
 COMMAND_HELLO = 0x06
 COMMAND_VERSION = 0x08
+COMMAND_WINDOW_UPDATE = 0x09
 
 
 # --- Audio Parameters ---
@@ -56,15 +58,18 @@ class HandshakeState:
     COMPLETE = 2
 
 class KV4P_Driver:
-    def __init__(self, port, baudrate, input_device_index, output_device_index, initial_freq):
-        self.serial_port = serial.Serial(port, baudrate, timeout=0.1)
-        # Set DTR and RTS to match the Android application's behavior
+    def __init__(self, port, baudrate, input_device_index, output_device_index, initial_freq, initial_squelch):
+        self.serial_port = serial.Serial(port, baudrate, timeout=0.1, write_timeout=1)
         self.serial_port.rts = True
         self.serial_port.dtr = True
         
         self.p_audio = pyaudio.PyAudio()
         self.initial_freq = initial_freq
+        self.initial_squelch = initial_squelch
         self.handshake_state = HandshakeState.WAITING_FOR_HELLO
+        self.flow_control_window = 1024
+        self.window_lock = threading.Lock()
+        self.stop_event = threading.Event()
 
         # --- RX (Receiving) Audio Setup ---
         self.opus_decoder = OpusDecoder(sampling_frequency=AUDIO_SAMPLE_RATE, channels=AUDIO_CHANNELS)
@@ -117,11 +122,15 @@ class KV4P_Driver:
     def _read_serial(self):
         print("[INFO] Serial reader thread started.")
         buffer = b''
-        while self.serial_port.is_open:
+        while not self.stop_event.is_set():
             try:
-                data_in = self.serial_port.read(1024)
-                if data_in:
-                    buffer += data_in
+                if self.serial_port and self.serial_port.is_open:
+                    data_in = self.serial_port.read(1024)
+                    if data_in:
+                        print(f"Serial RX: {data_in!r}")
+                        buffer += data_in
+                else:
+                    break
                 
                 while True:
                     start_index = buffer.find(COMMAND_DELIMITER)
@@ -136,27 +145,40 @@ class KV4P_Driver:
 
                     payload_start = header_start + 3
                     payload = buffer[payload_start:payload_start + payload_len]
-
+                    
+                    print(f"  [+] Packet found: Command=0x{command:02x}, Payload Length={payload_len}")
                     self.process_command(command, payload)
                     
                     buffer = buffer[start_index + packet_len:]
+            except serial.SerialException:
+                break
             except Exception as e:
                 print(f"\n[ERROR] Unhandled exception in serial reader thread: {e}")
                 traceback.print_exc()
                 break
+        print("[INFO] Serial reader thread stopped.")
 
     def process_command(self, command, payload):
+        if command == COMMAND_WINDOW_UPDATE and len(payload) == 4:
+            with self.window_lock:
+                window_update = struct.unpack('<I', payload)[0]
+                self.flow_control_window += window_update
+                print(f"[FLOW] Window updated by {window_update}, new size: {self.flow_control_window}")
+            return
+
         if self.handshake_state == HandshakeState.WAITING_FOR_HELLO:
             if command == COMMAND_HELLO:
                 print("[INFO] HELLO received. Sending config.")
-                self._send_command(COMMAND_HOST_CONFIG, b'\x01') # High power
+                self._send_command(COMMAND_HOST_CONFIG, b'\x01')
                 self.handshake_state = HandshakeState.WAITING_FOR_VERSION
         
         elif self.handshake_state == HandshakeState.WAITING_FOR_VERSION:
-            if command == COMMAND_VERSION:
-                print(f"[INFO] Version received: {payload.hex()}. Handshake complete.")
+            if command == COMMAND_VERSION and len(payload) >= 7:
+                ver, radio_status, window_size = struct.unpack('<HcI', payload[:7])
+                with self.window_lock:
+                    self.flow_control_window = window_size
+                print(f"[INFO] Version received. Window size: {self.flow_control_window}. Handshake complete.")
                 self.handshake_state = HandshakeState.COMPLETE
-                # Now that handshake is done, send the final initialization sequence.
                 self.finish_initialization()
         
         elif self.handshake_state == HandshakeState.COMPLETE:
@@ -172,25 +194,22 @@ class KV4P_Driver:
                         bytes_to_write = samples_decoded * AUDIO_CHANNELS * AUDIO_WIDTH
                         decoded_pcm = ctypes.string_at(self.pcm_buffer, bytes_to_write)
                         self.output_stream.write(decoded_pcm)
+                    else:
+                        print(f"Opus decode failed with code: {samples_decoded}")
                 except PyOggError as e:
                     print(f"    [!] Opus decoding error: {e}")
 
     def finish_initialization(self):
         print("[INFO] Finishing initialization...")
-        # This sequence is critical and mirrors the Android app's logic.
-        # 1. Set High/Low power state
-        self._send_command(COMMAND_HOST_HL, b'\x01') # High power
-        # 2. Set filters (default: all off)
-        self._send_command(COMMAND_HOST_FILTERS, b'\x00')
-        # 3. Set the initial frequency.
-        self.set_frequency(self.initial_freq)
-        # 4. Enable RSSI reporting (and audio forwarding)
-        self._send_command(COMMAND_HOST_RSSI, b'\x01')
+        self.set_frequency(self.initial_freq, self.initial_squelch)
 
-    def set_frequency(self, mhz_float):
-        print(f"Setting frequency to {mhz_float} MHz")
-        payload = struct.pack('<BffBBB', 0, mhz_float, mhz_float, 0, 1, 0)
+    def set_frequency(self, mhz_float, squelch_level):
+        print(f"Setting frequency to {mhz_float} MHz with Squelch {squelch_level}")
+        payload = struct.pack('<BffBBB', 0, mhz_float, mhz_float, 0, squelch_level, 0)
         self._send_command(COMMAND_HOST_GROUP, payload)
+        self._send_command(COMMAND_HOST_HL, b'\x01') 
+        self._send_command(COMMAND_HOST_FILTERS, b'\x00')
+        self._send_command(COMMAND_HOST_RSSI, b'\x01')
 
     def ptt_on(self):
         self._send_command(COMMAND_HOST_PTT_DOWN)
@@ -203,6 +222,16 @@ class KV4P_Driver:
         self._send_command(COMMAND_HOST_PTT_UP)
 
     def _send_command(self, command, payload=b''):
+        packet_size = 7 + len(payload)
+        can_send = False
+        while not can_send:
+            with self.window_lock:
+                if self.flow_control_window >= packet_size:
+                    self.flow_control_window -= packet_size
+                    can_send = True
+            if not can_send:
+                time.sleep(0.01)
+
         try:
             header = struct.pack('<4sBH', COMMAND_DELIMITER, command, len(payload))
             self.serial_port.write(header + payload)
@@ -210,13 +239,22 @@ class KV4P_Driver:
             print(f"Serial write error: {e}")
 
     def close(self):
+        print("[INFO] Closing driver...")
+        self.stop_event.set()
+        if self.reader_thread.is_alive():
+            self.reader_thread.join()
+        
         if self.input_stream.is_active(): self.input_stream.stop_stream()
         self.input_stream.close()
+        
         self.output_stream.stop_stream()
         self.output_stream.close()
+        
         self.p_audio.terminate()
+        
         if self.serial_port and self.serial_port.is_open:
             self.serial_port.close()
+        print("[INFO] Driver closed.")
 
 
 class App:
@@ -230,11 +268,13 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
+        # --- Port Selection ---
         ttk.Label(self.root, text="COM Port:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
         self.port_combo = ttk.Combobox(self.root, values=[p.device for p in serial.tools.list_ports.comports()])
         self.port_combo.set(self.config.get('com_port', ''))
         self.port_combo.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
 
+        # --- Audio Device Selection ---
         self.input_devices = {info['name']: info['index'] for info in self.get_audio_devices('input')}
         self.output_devices = {info['name']: info['index'] for info in self.get_audio_devices('output')}
 
@@ -251,19 +291,31 @@ class App:
         self.connect_button = ttk.Button(self.root, text="Connect", command=self.connect)
         self.connect_button.grid(row=0, column=2, rowspan=3, padx=5, pady=5, sticky='ns')
 
+        # --- Frequency & PTT ---
         ttk.Label(self.root, text="Frequency (MHz):").grid(row=3, column=0, padx=5, pady=5, sticky='w')
         self.freq_entry = ttk.Entry(self.root)
         self.freq_entry.insert(0, self.config.get('frequency', '146.520'))
         self.freq_entry.grid(row=3, column=1, padx=5, pady=5, sticky='ew')
         self.set_freq_button = ttk.Button(self.root, text="Set Freq", command=self.set_frequency_from_ui)
         self.set_freq_button.grid(row=3, column=2, padx=5, pady=5, sticky='ew')
+        
+        # --- Squelch Control ---
+        ttk.Label(self.root, text="Squelch:").grid(row=4, column=0, padx=5, pady=5, sticky='w')
+        self.squelch_var = tk.IntVar(value=self.config.get('squelch', 1))
+        self.squelch_scale = ttk.Scale(self.root, from_=0, to=8, orient=tk.HORIZONTAL, variable=self.squelch_var, command=self.on_squelch_change)
+        self.squelch_scale.grid(row=4, column=1, padx=5, pady=5, sticky='ew')
+        self.squelch_label = ttk.Label(self.root, text=str(self.squelch_var.get()))
+        self.squelch_label.grid(row=4, column=2, padx=5, pady=5, sticky='w')
 
         self.ptt_button = ttk.Button(self.root, text="PTT")
-        self.ptt_button.grid(row=4, column=0, columnspan=3, padx=5, pady=10, sticky='ew')
+        self.ptt_button.grid(row=5, column=0, columnspan=3, padx=5, pady=10, sticky='ew')
         self.ptt_button.bind("<ButtonPress-1>", self.ptt_on)
         self.ptt_button.bind("<ButtonRelease-1>", self.ptt_off)
 
         self.root.grid_columnconfigure(1, weight=1)
+
+    def on_squelch_change(self, value):
+        self.squelch_label.config(text=str(int(float(value))))
 
     def get_audio_devices(self, kind='input'):
         devices = []
@@ -295,7 +347,8 @@ class App:
             input_idx = self.input_devices[input_dev_name]
             output_idx = self.output_devices[output_dev_name]
             initial_freq = float(self.freq_entry.get())
-            self.driver = KV4P_Driver(port, 115200, input_idx, output_idx, initial_freq)
+            initial_squelch = self.squelch_var.get()
+            self.driver = KV4P_Driver(port, 115200, input_idx, output_idx, initial_freq, initial_squelch)
             self.connect_button.config(text="Disconnect")
             print(f"Connected to {port}")
         except Exception as e:
@@ -307,8 +360,9 @@ class App:
         if self.driver and self.driver.handshake_state == HandshakeState.COMPLETE:
             try:
                 freq = float(self.freq_entry.get())
+                squelch = self.squelch_var.get()
                 if 144.0 <= freq <= 148.0:
-                    self.driver.set_frequency(freq)
+                    self.driver.set_frequency(freq, squelch)
                 else:
                     print("Frequency must be between 144.000 and 148.000 MHz")
             except ValueError:
@@ -334,7 +388,8 @@ class App:
             'com_port': self.port_combo.get(),
             'audio_input': self.input_combo.get(),
             'audio_output': self.output_combo.get(),
-            'frequency': self.freq_entry.get()
+            'frequency': self.freq_entry.get(),
+            'squelch': self.squelch_var.get()
         }
         try:
             with open(CONFIG_FILE, 'w') as f:
@@ -346,7 +401,6 @@ class App:
         self.save_config()
         if self.driver:
             self.driver.close()
-        self.p_audio.terminate()
         self.root.destroy()
 
 
