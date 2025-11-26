@@ -7,5 +7,7 @@ backups/
 *.lck
 *.swp
 .idea
+*.wav
 /venv/
 /desktop-app/config.json
+/desktop-app/sample/
