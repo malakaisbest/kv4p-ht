@@ -325,6 +325,12 @@ class RadioController:
             self._tx_pcm_buffer.clear()
         self._send_command(HostCommand.STOP)
 
+    def set_power(self, high_power: bool) -> None:
+        """Sets the radio's transmit power to high or low."""
+        level = 1 if high_power else 0
+        LOGGER.debug("Setting power to %s", "high" if high_power else "low")
+        self._send_command(HostCommand.HL, bytes([level]))
+
     def tune_to_frequency(
         self,
         tx_frequency: str,

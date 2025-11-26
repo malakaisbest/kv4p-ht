@@ -12,6 +12,7 @@ class Config:
             'tx_frequency': '146.520',
             'tone': 'None',
             'band_mode': 'Narrow',
+            'power': 'High',
             'ptt_hotkey': 'space'
         }
         self.load()

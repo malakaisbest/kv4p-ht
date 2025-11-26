@@ -25,7 +25,7 @@ class RadioApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("KV4P Radio Desktop Controller ~ Malaka Wickremasinghe~")
-        self.geometry("500x550")
+        self.geometry("500x580")
 
         self.config = Config('config.json')
         self.audio_engine = AudioEngine()
@@ -93,11 +93,19 @@ class RadioApp(tk.Tk):
         self.squelch_label = ttk.Label(radio_frame, text="0")
         self.squelch_label.grid(row=3, column=2, padx=5, pady=5)
         
+        ttk.Label(radio_frame, text="Band:").grid(row=4, column=0, padx=5, pady=5, sticky="w")
         band_frame = ttk.Frame(radio_frame)
-        band_frame.grid(row=4, column=0, columnspan=3, sticky="w", padx=5, pady=5)
+        band_frame.grid(row=4, column=1, columnspan=2, sticky="w", padx=5, pady=5)
         self.band_selection_var = tk.StringVar()
         ttk.Radiobutton(band_frame, text="Wide Band", variable=self.band_selection_var, value="Wide", command=self.on_band_change).pack(side="left")
         ttk.Radiobutton(band_frame, text="Narrow Band", variable=self.band_selection_var, value="Narrow", command=self.on_band_change).pack(side="left")
+
+        ttk.Label(radio_frame, text="Tx Power:").grid(row=5, column=0, padx=5, pady=5, sticky="w")
+        power_frame = ttk.Frame(radio_frame)
+        power_frame.grid(row=5, column=1, columnspan=2, sticky="w", padx=5, pady=5)
+        self.power_var = tk.StringVar()
+        ttk.Radiobutton(power_frame, text="High Power", variable=self.power_var, value="High", command=self.on_power_change).pack(side="left")
+        ttk.Radiobutton(power_frame, text="Low Power", variable=self.power_var, value="Low", command=self.on_power_change).pack(side="left")
 
         radio_frame.columnconfigure(1, weight=1)
 
@@ -146,6 +154,7 @@ class RadioApp(tk.Tk):
         self.tx_frequency_var.set(self.config.get('tx_frequency', '146.520'))
         self.tone_var.set(self.config.get('tone', 'None'))
         self.band_selection_var.set(self.config.get('band_mode', 'Narrow'))
+        self.power_var.set(self.config.get('power', 'High'))
         self.port_var.set(self.config.get('serial_port', ''))
 
     def on_device_change(self, event):
@@ -169,6 +178,10 @@ class RadioApp(tk.Tk):
 
     def on_band_change(self):
         self.config.set('band_mode', self.band_selection_var.get())
+        self.apply_radio_settings()
+
+    def on_power_change(self):
+        self.config.set('power', self.power_var.get())
         self.apply_radio_settings()
 
     def on_squelch_change(self, value):
@@ -221,6 +234,8 @@ class RadioApp(tk.Tk):
                 tone_name = self.tone_var.get()
                 tone_value = TONE_MAPPINGS.get(tone_name, 0)
                 wideband = self.band_selection_var.get() == "Wide"
+                high_power = self.power_var.get() == "High"
+                self.controller.set_power(high_power)
                 self.controller.tune_to_frequency(
                     rx_frequency=self.rx_frequency_var.get(),
                     tx_frequency=self.tx_frequency_var.get(),
