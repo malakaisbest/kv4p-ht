@@ -1,11 +1,13 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import sounddevice as sd
 from serial.tools import list_ports
 import threading
 import logging
 import wave
 from datetime import datetime
+import time
+import os
 from .config import Config
 from .audio import AudioEngine
 from .radio_controller import RadioController, RadioControllerError
@@ -24,8 +26,8 @@ TONE_MAPPINGS = {
 class RadioApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("KV4P Radio Desktop Controller ~ Malaka Wickremasinghe~")
-        self.geometry("500x580")
+        self.title("KV4P Radio Desktop Controller ~ Malaka Wickremasinghe ~")
+        self.geometry("500x650")
 
         self.config = Config('config.json')
         self.audio_engine = AudioEngine()
@@ -33,6 +35,10 @@ class RadioApp(tk.Tk):
         self.is_transmitting = False
         self.is_recording = False
         self.wave_file = None
+        self.audio_file_path = None
+        self.is_playing_file = False
+        self.play_thread = None
+        self.stop_play_event = threading.Event()
 
         self._build_ui()
         self.load_settings()
@@ -95,19 +101,34 @@ class RadioApp(tk.Tk):
         
         ttk.Label(radio_frame, text="Band:").grid(row=4, column=0, padx=5, pady=5, sticky="w")
         band_frame = ttk.Frame(radio_frame)
-        band_frame.grid(row=4, column=1, columnspan=2, sticky="w", padx=5, pady=5)
+        band_frame.grid(row=4, column=1, columnspan=2, sticky="w")
         self.band_selection_var = tk.StringVar()
         ttk.Radiobutton(band_frame, text="Wide Band", variable=self.band_selection_var, value="Wide", command=self.on_band_change).pack(side="left")
         ttk.Radiobutton(band_frame, text="Narrow Band", variable=self.band_selection_var, value="Narrow", command=self.on_band_change).pack(side="left")
 
         ttk.Label(radio_frame, text="Tx Power:").grid(row=5, column=0, padx=5, pady=5, sticky="w")
         power_frame = ttk.Frame(radio_frame)
-        power_frame.grid(row=5, column=1, columnspan=2, sticky="w", padx=5, pady=5)
+        power_frame.grid(row=5, column=1, columnspan=2, sticky="w")
         self.power_var = tk.StringVar()
         ttk.Radiobutton(power_frame, text="High Power", variable=self.power_var, value="High", command=self.on_power_change).pack(side="left")
         ttk.Radiobutton(power_frame, text="Low Power", variable=self.power_var, value="Low", command=self.on_power_change).pack(side="left")
 
         radio_frame.columnconfigure(1, weight=1)
+
+        # Audio File Player
+        player_frame = ttk.LabelFrame(main_frame, text="Audio File Player")
+        player_frame.pack(fill="x", expand=True, pady=5)
+
+        self.browse_button = ttk.Button(player_frame, text="Browse", command=self.browse_file)
+        self.browse_button.grid(row=0, column=0, padx=5, pady=5)
+        self.file_label = ttk.Label(player_frame, text="No file selected")
+        self.file_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        
+        self.play_button = ttk.Button(player_frame, text="Play Audio File", command=self.toggle_play_file)
+        self.play_button.grid(row=1, column=0, padx=5, pady=5)
+        self.loop_var = tk.BooleanVar()
+        self.loop_check = ttk.Checkbutton(player_frame, text="Loop", variable=self.loop_var)
+        self.loop_check.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         # Connection
         conn_frame = ttk.LabelFrame(main_frame, text="Connection")
@@ -187,7 +208,6 @@ class RadioApp(tk.Tk):
     def on_squelch_change(self, value):
         squelch_level = int(float(value))
         self.squelch_label.config(text=str(squelch_level))
-        logging.debug(f"UI Squelch Slider changed to: {squelch_level}")
         self.config.set('squelch_level', squelch_level)
         self.apply_radio_settings()
 
@@ -220,6 +240,8 @@ class RadioApp(tk.Tk):
             self.controller = None
 
     def disconnect(self):
+        if self.is_playing_file:
+            self.stop_play_event.set()
         if self.is_recording:
             self.toggle_recording()
         if self.controller:
@@ -247,7 +269,7 @@ class RadioApp(tk.Tk):
                 self.after(0, lambda: messagebox.showerror("Error", f"Failed to apply settings: {e}"))
 
     def start_transmit(self):
-        if not self.controller or not self.controller.is_connected or self.is_transmitting:
+        if self.is_playing_file or not self.controller or not self.controller.is_connected or self.is_transmitting:
             return
         self.is_transmitting = True
         self.ptt_button.state(['pressed'])
@@ -287,6 +309,64 @@ class RadioApp(tk.Tk):
     def _write_to_wav_file(self, audio_data):
         if self.wave_file:
             self.wave_file.writeframes(audio_data)
+
+    def browse_file(self):
+        path = filedialog.askopenfilename(filetypes=[("WAV files", "*.wav")])
+        if path:
+            self.audio_file_path = path
+            self.file_label.config(text=os.path.basename(path))
+
+    def toggle_play_file(self):
+        if self.is_playing_file:
+            self.stop_play_event.set()
+            self.play_button.config(text="Stopping...", state="disabled")
+        else:
+            if not self.audio_file_path:
+                messagebox.showinfo("Info", "Please select an audio file first.")
+                return
+            if not self.controller or not self.controller.is_connected:
+                messagebox.showinfo("Info", "Connect to the radio to play an audio file.")
+                return
+            
+            self.is_playing_file = True
+            self.play_button.config(text="Stop")
+            self.ptt_button.config(state="disabled")
+            self.stop_play_event.clear()
+            self.play_thread = threading.Thread(target=self._play_audio_file, daemon=True)
+            self.play_thread.start()
+
+    def _play_audio_file(self):
+        chunk_size = 1920 * 2
+        try:
+            while not self.stop_play_event.is_set():
+                with wave.open(self.audio_file_path, 'rb') as wf:
+                    if wf.getframerate() != self.audio_engine.sample_rate or wf.getnchannels() != 1 or wf.getsampwidth() != 2:
+                        self.after(0, lambda: messagebox.showerror("Error", "Audio file must be 48kHz, 16-bit, mono WAV."))
+                        break
+                    
+                    self.controller.start_tx_mode()
+                    
+                    data = wf.readframes(chunk_size // 2)
+                    while data and not self.stop_play_event.is_set():
+                        self.controller.send_audio_data(data)
+                        time.sleep(0.040)
+                        data = wf.readframes(chunk_size // 2)
+
+                if not self.loop_var.get() or self.stop_play_event.is_set():
+                    break
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to play audio file: {e}"))
+        finally:
+            if self.controller:
+                self.controller.end_tx_mode()
+            self.after(0, self._playback_finished)
+
+    def _playback_finished(self):
+        self.is_playing_file = False
+        self.play_button.config(text="Play Audio File", state="enabled")
+        self.ptt_button.config(state="!disabled")
+        if self.play_thread:
+            self.play_thread = None
 
     def on_key_press(self, event):
         if event.keysym == 'space' and not self.is_transmitting:
