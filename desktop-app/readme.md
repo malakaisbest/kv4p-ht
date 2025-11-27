@@ -34,10 +34,10 @@ Your terminal prompt should now show `(venv)` at the beginning, indicating that 
 
 ### 3. Install Required Packages
 
-With the virtual environment active, install the necessary Python packages using `pip`:
+With the virtual environment active, install all the necessary Python packages using the `requirements.txt` file:
 
 ```sh
-pip install pyserial sounddevice numpy opuslib
+pip install -r requirements.txt
 ```
 
 ## Running the Application
@@ -48,7 +48,10 @@ Once the setup is complete, you can run the application with the following comma
 python -m app.app
 ```
 
-The radio controller window should appear, allowing you to connect to your device and begin operating it.
+Or by using the provided batch script:
+```sh
+.\\run.bat
+```
 
 ## Troubleshooting
 
@@ -58,7 +61,7 @@ If you encounter errors related to Opus decoding or encoding when running the ap
 
 **Solution:**
 
-1.  Locate the `opus.dll` file inside `desktop-app` directory.
+1.  Locate the `opus.dll` file. It is usually found inside this directory.
 2.  Copy this `opus.dll` file to your `C:\Windows\System32` folder.
 
 After copying the DLL, restart the application. This should resolve the Opus-related errors.

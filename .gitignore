@@ -8,6 +8,6 @@ backups/
 *.swp
 .idea
 *.wav
-/venv/
+/desktop-app/venv/
 /desktop-app/config.json
 /desktop-app/sample/
