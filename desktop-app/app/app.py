@@ -27,7 +27,7 @@ class RadioApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("KV4P Radio Desktop Controller ~ Malaka Wickremasinghe ~")
-        self.geometry("500x650")
+        self.geometry("500x700")
 
         self.config = Config('config.json')
         self.audio_engine = AudioEngine()
@@ -51,6 +51,18 @@ class RadioApp(tk.Tk):
     def _build_ui(self):
         main_frame = ttk.Frame(self, padding="10")
         main_frame.pack(fill="both", expand=True)
+
+        # Status Frame
+        status_frame = ttk.LabelFrame(main_frame, text="Status")
+        status_frame.pack(fill="x", expand=True, pady=5)
+        
+        ttk.Label(status_frame, text="RSSI:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.rssi_var = tk.IntVar()
+        self.rssi_bar = ttk.Progressbar(status_frame, variable=self.rssi_var, maximum=255)
+        self.rssi_bar.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.rssi_label = ttk.Label(status_frame, text="0")
+        self.rssi_label.grid(row=0, column=2, padx=5, pady=5)
+        status_frame.columnconfigure(1, weight=1)
 
         # Audio Settings
         audio_frame = ttk.LabelFrame(main_frame, text="Audio Devices")
@@ -211,6 +223,16 @@ class RadioApp(tk.Tk):
         self.config.set('squelch_level', squelch_level)
         self.apply_radio_settings()
 
+    def update_rssi(self, value):
+        self.rssi_var.set(value)
+        self.rssi_label.config(text=str(value))
+
+    def on_physical_ptt_change(self, is_down):
+        if is_down:
+            self.start_transmit()
+        else:
+            self.stop_transmit()
+
     def toggle_connection(self):
         if self.controller and self.controller.is_connected:
             self.disconnect()
@@ -231,6 +253,8 @@ class RadioApp(tk.Tk):
             self.controller.initialize()
             self.controller.start_rx_mode()
             self.controller.add_audio_listener(self.audio_engine.enqueue_playback)
+            self.controller.add_rssi_listener(lambda value: self.after(0, self.update_rssi, value))
+            self.controller.add_ptt_state_listener(lambda is_down: self.after(0, self.on_physical_ptt_change, is_down))
             self.audio_engine.start_playback()
             self.apply_radio_settings()
             self.after(0, lambda: self.connect_button.config(text="Disconnect", state="enabled"))
@@ -249,6 +273,7 @@ class RadioApp(tk.Tk):
             self.controller = None
         self.audio_engine.stop_playback()
         self.connect_button.config(text="Connect")
+        self.update_rssi(0)
 
     def apply_radio_settings(self):
         if self.controller and self.controller.is_connected:

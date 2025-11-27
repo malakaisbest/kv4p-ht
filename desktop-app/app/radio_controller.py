@@ -133,6 +133,8 @@ class RadioController:
         self._mode = RadioMode.STARTUP
         self._lock = threading.RLock()
         self._audio_listeners: List[Callable[[bytes], None]] = []
+        self._rssi_listeners: List[Callable[[int], None]] = []
+        self._ptt_state_listeners: List[Callable[[bool], None]] = []
         self._error_listeners: List[Callable[[Exception], None]] = []
         self._stop_reader = threading.Event()
         self._reader_thread: Optional[threading.Thread] = None
@@ -434,6 +436,20 @@ class RadioController:
         if callback in self._audio_listeners:
             self._audio_listeners.remove(callback)
 
+    def add_rssi_listener(self, callback: Callable[[int], None]) -> None:
+        self._rssi_listeners.append(callback)
+
+    def remove_rssi_listener(self, callback: Callable[[int], None]) -> None:
+        if callback in self._rssi_listeners:
+            self._rssi_listeners.remove(callback)
+
+    def add_ptt_state_listener(self, callback: Callable[[bool], None]) -> None:
+        self._ptt_state_listeners.append(callback)
+
+    def remove_ptt_state_listener(self, callback: Callable[[bool], None]) -> None:
+        if callback in self._ptt_state_listeners:
+            self._ptt_state_listeners.remove(callback)
+
     def add_error_listener(self, callback: Callable[[Exception], None]) -> None:
         self._error_listeners.append(callback)
 
@@ -552,9 +568,11 @@ class RadioController:
                 LOGGER.debug("Window update from ESP32: %d (available=%s)", window, self._window_available)
         elif command == DeviceCommand.SMETER_REPORT:
             if payload:
-                LOGGER.debug("RSSI report: %d", payload[0])
-        elif command in {DeviceCommand.PHYS_PTT_DOWN, DeviceCommand.PHYS_PTT_UP}:
-            LOGGER.info("Physical PTT %s", "down" if command == DeviceCommand.PHYS_PTT_DOWN else "up")
+                self._notify_rssi(payload[0])
+        elif command == DeviceCommand.PHYS_PTT_DOWN:
+            self._notify_ptt_state(True)
+        elif command == DeviceCommand.PHYS_PTT_UP:
+            self._notify_ptt_state(False)
         elif command in {
             DeviceCommand.DEBUG_INFO,
             DeviceCommand.DEBUG_WARN,
@@ -668,12 +686,26 @@ class RadioController:
         return value
 
     def _notify_audio(self, data: bytes) -> None:
-        LOGGER.debug("Forwarding %d bytes of audio to listeners.", len(data))
+        # LOGGER.debug("Forwarding %d bytes of audio to listeners.", len(data))
         for callback in list(self._audio_listeners):
             try:
                 callback(data)
             except Exception as exc:  # pragma: no cover - defensive
                 LOGGER.exception("Audio listener failed: %s", exc)
+
+    def _notify_rssi(self, value: int) -> None:
+        for callback in list(self._rssi_listeners):
+            try:
+                callback(value)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.exception("RSSI listener failed: %s", exc)
+
+    def _notify_ptt_state(self, is_down: bool) -> None:
+        for callback in list(self._ptt_state_listeners):
+            try:
+                callback(is_down)
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.exception("PTT state listener failed: %s", exc)
 
     def _notify_error(self, exc: Exception) -> None:
         for callback in list(self._error_listeners):
