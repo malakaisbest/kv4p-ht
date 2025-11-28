@@ -43,6 +43,7 @@ class RadioApp(tk.Tk):
         self._build_ui()
         self.load_settings()
         self.populate_devices()
+        self.update_tx_controls_state()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind('<KeyPress>', self.on_key_press)
@@ -122,8 +123,9 @@ class RadioApp(tk.Tk):
         power_frame = ttk.Frame(radio_frame)
         power_frame.grid(row=5, column=1, columnspan=2, sticky="w")
         self.power_var = tk.StringVar()
-        ttk.Radiobutton(power_frame, text="High Power", variable=self.power_var, value="High", command=self.on_power_change).pack(side="left")
-        ttk.Radiobutton(power_frame, text="Low Power", variable=self.power_var, value="Low", command=self.on_power_change).pack(side="left")
+        ttk.Radiobutton(power_frame, text="High", variable=self.power_var, value="High", command=self.on_power_change).pack(side="left")
+        ttk.Radiobutton(power_frame, text="Low", variable=self.power_var, value="Low", command=self.on_power_change).pack(side="left")
+        ttk.Radiobutton(power_frame, text="No TX", variable=self.power_var, value="No TX", command=self.on_power_change).pack(side="left")
 
         radio_frame.columnconfigure(1, weight=1)
 
@@ -215,6 +217,7 @@ class RadioApp(tk.Tk):
 
     def on_power_change(self):
         self.config.set('power', self.power_var.get())
+        self.update_tx_controls_state()
         self.apply_radio_settings()
 
     def on_squelch_change(self, value):
@@ -232,6 +235,12 @@ class RadioApp(tk.Tk):
             self.start_transmit()
         else:
             self.stop_transmit()
+
+    def update_tx_controls_state(self):
+        state = "disabled" if self.power_var.get() == "No TX" else "normal"
+        self.tx_frequency_entry.config(state=state)
+        self.play_button.config(state=state)
+        self.ptt_button.config(state=state)
 
     def toggle_connection(self):
         if self.controller and self.controller.is_connected:
@@ -278,11 +287,14 @@ class RadioApp(tk.Tk):
     def apply_radio_settings(self):
         if self.controller and self.controller.is_connected:
             try:
+                power_mode = self.power_var.get()
+                high_power = (power_mode == "High")
+                self.controller.set_power(high_power)
+
                 tone_name = self.tone_var.get()
                 tone_value = TONE_MAPPINGS.get(tone_name, 0)
                 wideband = self.band_selection_var.get() == "Wide"
-                high_power = self.power_var.get() == "High"
-                self.controller.set_power(high_power)
+                
                 self.controller.tune_to_frequency(
                     rx_frequency=self.rx_frequency_var.get(),
                     tx_frequency=self.tx_frequency_var.get(),
@@ -294,7 +306,7 @@ class RadioApp(tk.Tk):
                 self.after(0, lambda: messagebox.showerror("Error", f"Failed to apply settings: {e}"))
 
     def start_transmit(self):
-        if self.is_playing_file or not self.controller or not self.controller.is_connected or self.is_transmitting:
+        if self.power_var.get() == "No TX" or self.is_playing_file or not self.controller or not self.controller.is_connected or self.is_transmitting:
             return
         self.is_transmitting = True
         self.ptt_button.state(['pressed'])
